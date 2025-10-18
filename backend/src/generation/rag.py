@@ -1,8 +1,8 @@
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 
-from litai import LLM
+from litellm import completion
 from src.vector_database.milvus_vector_db import MilvusVectorDB
 from src.embeddings.embedding_generator import EmbeddingGenerator
 
@@ -38,16 +38,11 @@ class RAGGenerator:
         self,
         embedding_generator: EmbeddingGenerator,
         vector_db: MilvusVectorDB,
-        lightning_api_key: str,
-        model_name: str = "gpt-3.5-turbo"
+        model_name: str = "groq/llama3-8b-8192"
     ):
         self.embedding_generator = embedding_generator
         self.vector_db = vector_db
-        
-        self.llm = LLM(
-            model=f"openai/{model_name}",
-            api_key=lightning_api_key
-        )
+        self.model_name = model_name
         
         self.model_name = model_name
         logger.info(f"RAG Generator initialized with {model_name}")
@@ -95,7 +90,7 @@ class RAGGenerator:
             prompt = self._create_rag_prompt(query, context)
             
             # Step 4: Generate response
-            response = self.llm.chat(prompt, max_tokens=2000)
+            response = completion(model=self.model_name, messages=[{"role": "user", "content": prompt}], max_tokens=2000)["choices"][0]["message"]["content"]
             
             # Step 5: Create result object
             rag_result = RAGResult(
@@ -220,7 +215,7 @@ DOCUMENT CONTENT (with citation references):
 
 Please provide a well-structured summary with proper citations:"""
             
-            response = self.llm.chat(summary_prompt, max_tokens=1000)
+            response = completion(model=self.model_name, messages=[{"role": "user", "content": summary_prompt}], max_tokens=1000)["choices"][0]["message"]["content"]
             
             return RAGResult(
                 query="Document Summary",
@@ -245,9 +240,9 @@ if __name__ == "__main__":
     from src.embeddings.embedding_generator import EmbeddingGenerator
     from src.vector_database.milvus_vector_db import MilvusVectorDB
     
-    lightning_key = os.getenv("LIGHTNING_API_KEY")
-    if not lightning_key:
-        print("Please set LIGHTNING_API_KEY environment variable")
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        print("Please set GROQ_API_KEY environment variable")
         exit(1)
     
     try:
@@ -256,8 +251,7 @@ if __name__ == "__main__":
         rag_generator = RAGGenerator(
             embedding_generator=embedding_gen,
             vector_db=vector_db,
-            lightning_api_key=lightning_key,
-            model_name="gpt-3.5-turbo"
+            model_name="groq/llama3-8b-8192"
         )
         
         test_query = "What are the main findings discussed in the documents?"
