@@ -7,6 +7,8 @@ import hashlib
 from datetime import datetime
 
 import pymupdf
+from docx import Document as DocxDocument
+from pptx import Presentation
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,7 +55,7 @@ class DocumentProcessor:
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.supported_formats = {'.pdf', '.txt', '.md'}  # add other formats if need be
+        self.supported_formats = {'.pdf', '.txt', '.md', '.pptx', '.docx'}  # add other formats if need be
 
     def process_document(self, file_path: str) -> List[DocumentMetadata]:
         file_path = Path(file_path)
@@ -70,6 +72,10 @@ class DocumentProcessor:
                 return self._process_pdf(file_path)
             elif file_path.suffix.lower() in {'.txt', '.md'}:
                 return self._process_text_file(file_path)
+            elif file_path.suffix.lower() == '.pptx':
+                return self._process_pptx(file_path)
+            elif file_path.suffix.lower() == '.docx':
+                return self._process_docx(file_path)
 
         except Exception as e:
             logger.error(f"Error processing document {file_path.name}: {e}")
@@ -128,7 +134,7 @@ class DocumentProcessor:
             chunks = self._create_chunks_from_text(
                 content,
                 file_path.name,
-                source_type='txt',
+                source_type=file_path.suffix.lower()[1:],  # 'txt' or 'md'
                 page_number=None,
                 additional_metadata=metadata
             )
@@ -138,6 +144,82 @@ class DocumentProcessor:
 
         except Exception as e:
             logger.error(f"Error processing text file {file_path}: {str(e)}")
+            raise
+
+    def _process_pptx(self, file_path: Path) -> List[DocumentMetadata]:
+        try:
+            presentation = Presentation(str(file_path))
+            text_content = []
+
+            for slide_number, slide in enumerate(presentation.slides, 1):
+                slide_text = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text:
+                        slide_text.append(shape.text)
+                if slide_text:
+                    text_content.append(f"Slide {slide_number}:\n" + "\n".join(slide_text))
+
+            full_text = "\n\n".join(text_content)
+
+            metadata = {
+                'total_slides': len(presentation.slides),
+                'file_size': file_path.stat().st_size,
+                'processed_at': datetime.now().isoformat()
+            }
+
+            chunks = self._create_chunks_from_text(
+                full_text,
+                file_path.name,
+                source_type='pptx',
+                page_number=None,
+                additional_metadata=metadata
+            )
+
+            logger.info(f"Processed PPTX: {len(chunks)} chunks from {len(presentation.slides)} slides")
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error processing PPTX {file_path}: {str(e)}")
+            raise
+
+    def _process_docx(self, file_path: Path) -> List[DocumentMetadata]:
+        try:
+            doc = DocxDocument(str(file_path))
+            text_content = []
+
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_content.append(para.text)
+
+            # Also extract from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            text_content.append(cell.text)
+
+            full_text = "\n".join(text_content)
+
+            metadata = {
+                'total_paragraphs': len(doc.paragraphs),
+                'total_tables': len(doc.tables),
+                'file_size': file_path.stat().st_size,
+                'processed_at': datetime.now().isoformat()
+            }
+
+            chunks = self._create_chunks_from_text(
+                full_text,
+                file_path.name,
+                source_type='docx',
+                page_number=None,
+                additional_metadata=metadata
+            )
+
+            logger.info(f"Processed DOCX: {len(chunks)} chunks from {len(doc.paragraphs)} paragraphs")
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error processing DOCX {file_path}: {str(e)}")
             raise
 
     def _create_chunks_from_text(

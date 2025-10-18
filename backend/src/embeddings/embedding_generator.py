@@ -4,7 +4,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from fastembed import TextEmbedding
-from src.document_processing.doc_processor import DocumentChunk
+from src.document_preprocessing.doc_processor import DocumentMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EmbeddedChunk:
     embedding: np.ndarray
-    chunk: DocumentChunk
+    chunk: DocumentMetadata
     embedding_model= str
 
     def to_vector_db_format(self) -> Dict[str, Any]:
@@ -51,7 +51,7 @@ class EmbeddingGenerator:
             logger.error(f"Failed to initialize embedding model: {str(e)}")
             raise
 
-        def generate_embeddings(self, chunks: List[DocumentChunk]) -> List[EmbeddedChunk]:
+        def generate_embeddings(self, chunks: List[DocumentMetadata]) -> List[EmbeddedChunk]:
          if not chunks:
             return []
         
@@ -91,7 +91,7 @@ class EmbeddingGenerator:
     
     def batch_generate_embeddings(
         self, 
-        chunks_batches: List[List[DocumentChunk]], 
+        chunks_batches: List[List[DocumentMetadata]], 
         batch_size: int = 32
     ) -> List[List[EmbeddedChunk]]:
         
@@ -111,7 +111,7 @@ class EmbeddingGenerator:
 
 
 if __name__ == "__main__":
-    from src.document_processing.doc_processor import DocumentProcessor
+    from src.document_preprocessing.doc_processor import DocumentProcessor
     
     doc_processor = DocumentProcessor()
     embedding_generator = EmbeddingGenerator()

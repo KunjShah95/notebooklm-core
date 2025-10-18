@@ -1,14 +1,22 @@
 import logging
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 from dataclasses import dataclass
+import base64
 
 from litellm import completion
 from src.vector_database.milvus_vector_db import MilvusVectorDB
 from src.embeddings.embedding_generator import EmbeddingGenerator
 
+@dataclass
+class MultimodalContent:
+    """Represents multimodal content (text, images, etc.)"""
+    type: str  # "text", "image", "audio", etc.
+    content: Union[str, bytes]  # text content or binary data
+    mime_type: Optional[str] = None  # e.g., "image/jpeg", "image/png"
+    metadata: Optional[Dict[str, Any]] = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class RAGResult:
@@ -18,6 +26,7 @@ class RAGResult:
     sources_used: List[Dict[str, Any]]
     retrieval_count: int
     generation_tokens: Optional[int] = None
+    multimodal_content: Optional[List[MultimodalContent]] = None
     
     def get_citation_summary(self) -> str:
         if not self.sources_used:
@@ -38,11 +47,21 @@ class RAGGenerator:
         self,
         embedding_generator: EmbeddingGenerator,
         vector_db: MilvusVectorDB,
-        model_name: str = "groq/llama3-8b-8192"
+        provider: str = "groq",
+        model_name: str = "llama3-8b-8192"
     ):
         self.embedding_generator = embedding_generator
         self.vector_db = vector_db
+        self.provider = provider.lower()
         self.model_name = model_name
+        
+        # Set model based on provider
+        if self.provider == "groq":
+            self.full_model_name = f"groq/{self.model_name}"
+        elif self.provider == "ollama":
+            self.full_model_name = f"ollama/{self.model_name}"
+        else:
+            self.full_model_name = self.model_name  # fallback
         
         self.model_name = model_name
         logger.info(f"RAG Generator initialized with {model_name}")
@@ -53,6 +72,7 @@ class RAGGenerator:
         max_chunks: int = 8,
         max_context_chars: int = 4000,
         top_k: int = 10,
+        multimodal_content: Optional[List[MultimodalContent]] = None,
     ) -> RAGResult:
 
         if not query.strip():
@@ -90,14 +110,15 @@ class RAGGenerator:
             prompt = self._create_rag_prompt(query, context)
             
             # Step 4: Generate response
-            response = completion(model=self.model_name, messages=[{"role": "user", "content": prompt}], max_tokens=2000)["choices"][0]["message"]["content"]
+            response = completion(model=self.full_model_name, messages=[{"role": "user", "content": prompt}], max_tokens=2000)["choices"][0]["message"]["content"]
             
             # Step 5: Create result object
             rag_result = RAGResult(
                 query=query,
                 response=response,
                 sources_used=sources_info,
-                retrieval_count=len(search_results)
+                retrieval_count=len(search_results),
+                multimodal_content=multimodal_content
             )
             
             logger.info(f"Response generated successfully using {len(sources_info)} sources")
@@ -109,7 +130,8 @@ class RAGGenerator:
                 query=query,
                 response=f"I encountered an error while processing your question: {str(e)}",
                 sources_used=[],
-                retrieval_count=0
+                retrieval_count=0,
+                multimodal_content=multimodal_content
             )
     
     def _format_context_with_citations(
@@ -152,8 +174,56 @@ class RAGGenerator:
 
         return formatted_context, sources_info
     
-    def _create_rag_prompt(self, query: str, context: str) -> str:
-        prompt = f"""You are an AI assistant that answers questions based on provided source material. You must follow these citation rules:
+    def _create_rag_prompt(self, query: str, context: str, multimodal_content: Optional[List[MultimodalContent]] = None) -> Union[str, List[Dict[str, Any]]]:
+        if multimodal_content:
+            # Create multimodal message format for vision-capable models
+            content = []
+            
+            # Add text context and query
+            text_prompt = f"""You are an AI assistant that answers questions based on provided source material and visual content. You must follow these citation rules:
+
+CITATION REQUIREMENTS:
+1. For each factual claim in your answer, include the citation reference number in square brackets [1], [2], etc.
+2. Only use information from the provided context and images - do not add external knowledge
+3. If you cannot find relevant information in the context or images, say so clearly
+4. Be precise and accurate in your citations
+5. When multiple sources support the same point, list all relevant citations like this [1], [2], [3].
+
+CONTEXT (with citation references):
+{context}
+
+QUESTION: {query}
+
+Please provide a comprehensive answer with proper citations. Make sure every factual statement is supported by a citation reference."""
+            
+            content.append({"type": "text", "text": text_prompt})
+            
+            # Add multimodal content (images, etc.)
+            for item in multimodal_content:
+                if item.type == "image":
+                    # Convert image to base64 data URL
+                    if isinstance(item.content, bytes):
+                        base64_data = base64.b64encode(item.content).decode('utf-8')
+                    else:
+                        # Assume it's already base64 string
+                        base64_data = item.content
+                    
+                    mime_type = item.mime_type or "image/jpeg"
+                    data_url = f"data:{mime_type};base64,{base64_data}"
+                    
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": data_url}
+                    })
+                elif item.type == "text":
+                    # Additional text content
+                    content.append({"type": "text", "text": str(item.content)})
+                # Add other types as needed (audio, etc.)
+            
+            return content
+        else:
+            # Original text-only prompt
+            prompt = f"""You are an AI assistant that answers questions based on provided source material. You must follow these citation rules:
 
 CITATION REQUIREMENTS:
 1. For each factual claim in your answer, include the citation reference number in square brackets [1], [2], etc.
@@ -168,8 +238,8 @@ CONTEXT (with citation references):
 QUESTION: {query}
 
 Please provide a comprehensive answer with proper citations. Make sure every factual statement is supported by a citation reference."""
-        
-        return prompt
+            
+            return prompt
     
     def generate_summary(
         self,
@@ -215,7 +285,7 @@ DOCUMENT CONTENT (with citation references):
 
 Please provide a well-structured summary with proper citations:"""
             
-            response = completion(model=self.model_name, messages=[{"role": "user", "content": summary_prompt}], max_tokens=1000)["choices"][0]["message"]["content"]
+            response = completion(model=self.full_model_name, messages=[{"role": "user", "content": summary_prompt}], max_tokens=1000)["choices"][0]["message"]["content"]
             
             return RAGResult(
                 query="Document Summary",
@@ -236,7 +306,7 @@ Please provide a well-structured summary with proper citations:"""
 
 if __name__ == "__main__":
     import os
-    from src.document_processing.doc_processor import DocumentProcessor
+    from src.document_preprocessing.doc_processor import DocumentProcessor
     from src.embeddings.embedding_generator import EmbeddingGenerator
     from src.vector_database.milvus_vector_db import MilvusVectorDB
     
@@ -251,7 +321,8 @@ if __name__ == "__main__":
         rag_generator = RAGGenerator(
             embedding_generator=embedding_gen,
             vector_db=vector_db,
-            model_name="groq/llama3-8b-8192"
+            provider="groq",
+            model_name="llama3-8b-8192"
         )
         
         test_query = "What are the main findings discussed in the documents?"

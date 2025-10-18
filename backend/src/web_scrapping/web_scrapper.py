@@ -8,7 +8,7 @@ from urllib.parse import urlparse,urljoin
 from datetime import datetime 
 
 from firecrawl import Firecrawl
-from src.document_processing.doc_processor import DocumentChunk
+from src.document_preprocessing.doc_processor import DocumentMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class WebScrapper:
             chunk_size:int =1000,
             chunk_overlap:int =1000,
             wait_for_results:int=30
-    ) -> List[DocumentChunk]:
+    ) -> List[DocumentMetadata]:
         
         if not self._is_valid_url(url):
             raise ValueError(f"Invalid URL: {url}")
@@ -45,7 +45,7 @@ class WebScrapper:
         try:
             scrape_params ={
                 'formats':['markdown','html'],
-                'timeout':wait_for_result *1000
+                'timeout':wait_for_results *1000
             }
 
             result = self.app.scrape(url, **scrape_params )
@@ -104,7 +104,7 @@ class WebScrapper:
         page_data: WebPageData,
         chunk_size: int,
         chunk_overlap: int
-    ) -> List[DocumentChunk]:
+    ) -> List[DocumentMetadata]:
 
         if not page_data.success or not page_data.content.strip():
             logger.warning(f"No content to process for {page_data.url}")
@@ -136,7 +136,7 @@ class WebScrapper:
                     'url_fragment': f"{page_data.url}#chunk-{chunk_index}"
                 })
                 
-                chunk = DocumentChunk(
+                chunk = DocumentMetadata(
                     content=chunk_text,
                     source_file=page_data.title,
                     source_type='web',
@@ -160,7 +160,7 @@ class WebScrapper:
             chunk_size: int = 1000,
         chunk_overlap: int = 100,
         delay_between_requests: float = 1.0
-    ) -> List[List[DocumentChunk]]:
+    ) -> List[List[DocumentMetadata]]:
         
         all_chunks = []
         for i, url in enumerate(urls):
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         print("Please set FIRECRAWL_API_KEY environment variable")
         exit(1)
     
-    scraper = WebScraper(api_key)
+    scraper = WebScrapper(api_key)
     
     try:
         test_url = "https://blog.dailydoseofds.com/p/5-chunking-strategies-for-rag"

@@ -7,7 +7,7 @@ from pathlib import Path
 import json
 
 import assemblyai as aai
-from src.document_processing.doc_processor import DocumentChunk
+from src.document_preprocessing.doc_processor import DocumentMetadata, DocumentChunk
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class AudioTranscriber:
         audio_language: str = "en",
         chunk_size: int = 1000,
         chunk_overlap: int = 100
-    ) -> List[DocumentChunk]:
+    ) -> List[DocumentMetadata]:
         
         audio_path = Path(audio_path)
         

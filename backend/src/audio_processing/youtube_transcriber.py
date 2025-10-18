@@ -6,7 +6,7 @@ from typing import List, Optional
 import yt_dlp
 import assemblyai as aai
 
-from src.document_processing.doc_processor import DocumentChunk
+from src.document_preprocessing.doc_processor import DocumentMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class YouTubeTranscriber:
         self,
         url: str,
         cleanup_audio: bool = True
-    ) -> List[DocumentChunk]:
+    ) -> List[DocumentMetadata]:
         try:
             audio_path = self.download_audio(url)
             
@@ -90,7 +90,7 @@ class YouTubeTranscriber:
             chunks = []
             video_id = self.extract_video_id(url)
             for i, utterance in enumerate(transcript.utterances):
-                chunk = DocumentChunk(
+                chunk = DocumentMetadata(
                     content=f"Speaker {utterance.speaker}: {utterance.text}",
                     source_file=f"YouTube Video {video_id}",
                     source_type="youtube",

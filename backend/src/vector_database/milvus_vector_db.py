@@ -6,6 +6,9 @@ from pathlib import Path
 from pymilvus import MilvusClient, DataType, connections, utility
 from src.embeddings.embedding_generator import EmbeddedChunk
 
+from src.document_preprocessing.doc_processor import DocumentProcessor
+from src.embeddings.embedding_generator import EmbeddingGenerator
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -339,34 +342,41 @@ class MilvusVectorDB:
 
 
 if __name__ == "__main__":
-    from src.document_processing.doc_processor import DocumentProcessor
-    from src.embeddings.embedding_generator import EmbeddingGenerator
-    
+    # Ensure the project root (the directory that contains the 'src' package)
+    # is on sys.path so that imports like 'from src...' work when running
+    # this file as a script.
+    import sys
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(project_root))
+
+
     doc_processor = DocumentProcessor()
     embedding_generator = EmbeddingGenerator()
     vector_db = MilvusVectorDB()
-    
+
     try:
         chunks = doc_processor.process_document("data/raft.pdf")
         embedded_chunks = embedding_generator.generate_embeddings(chunks)
         vector_db.create_index()
-        
+
         inserted_ids = vector_db.insert_embeddings(embedded_chunks)
         print(f"Inserted {len(inserted_ids)} embeddings")
-        
+
         query_text = "What is the main topic?"
         query_vector = embedding_generator.generate_query_embedding(query_text)
-        
+
         search_results = vector_db.search(query_vector.tolist(), limit=5)
-        
+
         for i, result in enumerate(search_results):
             print(f"\nResult {i+1}:")
             print(f"Score: {result['score']:.4f}")
             print(f"Content: {result['content'][:200]}...")
             print(f"Citation: {result['citation']}")
-        
+
     except Exception as e:
         print(f"Error in example: {e}")
-    
+
     finally:
         vector_db.close()
