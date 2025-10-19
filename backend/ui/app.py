@@ -1,65 +1,131 @@
 import streamlit as st
-import sys
 import os
-from typing import List, Optional
-from PIL import Image
-import io
+import tempfile
+import time
+import logging
+from typing import List, Dict, Any
+import uuid
+from pathlib import Path
+from dotenv import load_dotenv
+import json
 
-# Add the src directory to the path so we can import our modules
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+load_dotenv()
 
-from src.generation.rag import RAGGenerator, MultimodalContent
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def create_interactive_citations(response_text: str, sources_used: List[Dict[str, Any]]) -> str:
+    import re
+    
+    logger.info(f"Processing interactive citations for {len(sources_used)} sources")
+
+    citation_map = {}
+    for source in sources_used:
+        ref = source.get('reference', '')
+        if ref:
+            match = re.search(r'\[(\d+)\]', ref)
+            if match:
+                num = match.group(1)
+                citation_map[num] = source
+    
+    def replace_citation(match):
+        """Replace citation number with interactive element"""
+        full_match = match.group(0)  # e.g., '[1]'
+        num = match.group(1)  # e.g., '1'
+        
+        if num in citation_map:
+            source = citation_map[num]
+            chunk_content = "Content not available"
+            source_info = f"Source: {source.get('source_file', 'Unknown')}"
+            
+            if source.get('page_number'):
+                source_info += f", Page: {source['page_number']}"
+            
+            try:
+                if st.session_state.pipeline and st.session_state.pipeline['vector_db']:
+                    chunk_id = source.get('chunk_id')
+                    logger.info(f"Processing citation {num} with chunk_id: {chunk_id}")
+                    
+                    if chunk_id:
+                        chunk_data = st.session_state.pipeline['vector_db'].get_chunk_by_id(chunk_id)
+                        logger.info(f"Retrieved chunk data: {chunk_data is not None}")
+                        
+                        if chunk_data and chunk_data.get('content'):
+                            chunk_content = chunk_data['content']
+                            logger.info(f"Got chunk content: {len(chunk_content)} characters")
+                            if len(chunk_content) > 300:
+                                chunk_content = chunk_content[:300] + "..."
+                        else:
+                            chunk_content = "Chunk content not available"
+                            logger.warning(f"Chunk data missing or no content: {chunk_data}")
+                    else:
+                        chunk_content = "No chunk ID provided"
+                        logger.warning(f"No chunk_id in source: {source}")
+                else:
+                    chunk_content = "Vector database not available"
+                    logger.warning("Pipeline or vector_db not available")
+            except Exception as e:
+                logger.error(f"Error retrieving chunk content for citation {num}: {e}")
+                chunk_content = f"Error retrieving chunk content: {str(e)}"
+            
+            chunk_content_escaped = (chunk_content
+                                    .replace('<', '&lt;')
+                                    .replace('>', '&gt;')
+                                    .replace('\n', '<br>')
+                                    .replace('"', '&quot;'))
+            source_info_escaped = (source_info
+                                 .replace('<', '&lt;')
+                                 .replace('>', '&gt;')
+                                 .replace('"', '&quot;'))
+            
+            return f'''<span class="citation-number">
+                {num}
+                <div class="citation-tooltip">
+                    <div class="tooltip-source">{source_info_escaped}</div>
+                    <div class="tooltip-content">{chunk_content_escaped}</div>
+                </div>
+            </span>'''
+        else:
+            return full_match
+    
+    # Replace all citation patterns [1], [2], etc.
+    interactive_text = re.sub(r'\[(\d+)\]', replace_citation, response_text)
+    
+    return interactive_text
+
+from src.document_preprocessing.doc_processor import DocumentProcessor
 from src.embeddings.embedding_generator import EmbeddingGenerator
 from src.vector_database.milvus_vector_db import MilvusVectorDB
+from src.generation.rag import RAGGenerator
+from src.memory.memory_layer import NotebookMemoryLayer
+from src.audio_processing.audio_transcriber import AudioTranscriber
+from src.audio_processing.youtube_transcriber import YouTubeTranscriber
+from src.web_scrapping.web_scrapper import WebScrapper
+from src.podcast.script_generator import PodcastScriptGenerator
+from src.podcast.text_to_speech import PodcastTTSGenerator
+from src.vector_database.in_memory_vector_db import InMemoryVectorDB
 
-# Page configuration
-st.set_page_config(
-    page_title="Multimodal RAG Assistant",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .citation-box {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-        margin: 1rem 0;
-    }
-    .response-box {
-        background-color: #ffffff;
-        padding: 1.5rem;
-        border-radius: 0.5rem;
-        border: 1px solid #e0e0e0;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+def initialize_components(provider: str = "groq", model_name: str = "llama3-8b-8192"):
+    """Compatibility wrapper to initialize core components programmatically.
 
-def initialize_components(provider: str, model_name: str):
-    """Initialize the RAG components"""
+    Returns a RAGGenerator-like object with attributes:
+      - document_processor
+      - embedding_generator
+      - vector_db
+
+    This mirrors older API used by tests and scripts.
+    """
     try:
-        # Initialize embedding generator
+        document_processor = DocumentProcessor()
         embedding_generator = EmbeddingGenerator()
 
-        # Initialize vector database
-        vector_db = MilvusVectorDB(
-            collection_name="documents",
-            embedding_dim=768  # Adjust based on your embedding model
-        )
+        try:
+            vector_db = MilvusVectorDB(collection_name="documents", embedding_dim=embedding_generator.get_embedding_dimension() or 384)
+        except Exception:
+            # Fallback to in-memory
+            vector_db = InMemoryVectorDB(collection_name="documents", embedding_dim=embedding_generator.get_embedding_dimension() or 384)
 
-        # Initialize RAG generator
         rag_generator = RAGGenerator(
             embedding_generator=embedding_generator,
             vector_db=vector_db,
@@ -67,237 +133,1034 @@ def initialize_components(provider: str, model_name: str):
             model_name=model_name
         )
 
+        # Attach document processor for backward compatibility
+        rag_generator.document_processor = document_processor
+        rag_generator.embedding_generator = embedding_generator
+        rag_generator.vector_db = vector_db
+
         return rag_generator
     except Exception as e:
-        st.error(f"Failed to initialize components: {str(e)}")
-        return None
+        # In non-Streamlit contexts we raise so callers can handle
+        raise
 
-def process_image_upload(uploaded_file) -> Optional[MultimodalContent]:
-    """Process uploaded image file into MultimodalContent"""
-    if uploaded_file is None:
-        return None
 
+def process_and_index_document(uploaded_file, doc_processor: DocumentProcessor, embedding_generator: EmbeddingGenerator, vector_db) -> tuple:
+    """Compatibility helper: accept either a file path (str/Path) or a file-like object
+
+    Returns: (success: bool, message: str, num_chunks: int)
+    """
+    temp_path = None
     try:
-        # Read the image
-        image_bytes = uploaded_file.read()
+        # If it's a path string, process directly
+        if isinstance(uploaded_file, (str, Path)):
+            file_path = str(uploaded_file)
+        else:
+            # Expect a file-like with .read() and .name or .getbuffer()
+            name = getattr(uploaded_file, 'name', f"temp_{uuid.uuid4().hex}.dat")
+            suffix = Path(name).suffix or ''
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                try:
+                    data = uploaded_file.getvalue()
+                except Exception:
+                    uploaded_file.seek(0)
+                    data = uploaded_file.read()
+                tmp.write(data)
+                temp_path = tmp.name
+            file_path = temp_path
 
-        # Get MIME type
-        mime_type = uploaded_file.type
+        chunks = doc_processor.process_document(file_path)
+        if not chunks:
+            return False, "No content extracted", 0
 
-        return MultimodalContent(
-            type="image",
-            content=image_bytes,
-            mime_type=mime_type,
-            metadata={"filename": uploaded_file.name}
-        )
+        embedded_chunks = embedding_generator.generate_embeddings(chunks)
+        if not embedded_chunks:
+            return False, "Failed to generate embeddings", 0
+
+        inserted_ids = vector_db.insert_embeddings(embedded_chunks)
+        if not inserted_ids:
+            return False, "Failed to insert embeddings", 0
+
+        return True, f"Indexed {len(inserted_ids)} chunks", len(inserted_ids)
+
     except Exception as e:
-        st.error(f"Error processing image: {str(e)}")
-        return None
+        return False, str(e), 0
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+st.set_page_config(
+    page_title="NotebookLM",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 24px;
+        font-weight: 600;
+        color: #ffffff;
+        margin-bottom: 20px;
+    }
+    
+    .source-item {
+        background: #2d3748;
+        border-radius: 8px;
+        padding: 12px;
+        margin: 8px 0;
+        border-left: 3px solid #4299e1;
+    }
+    
+    .source-title {
+        font-weight: 600;
+        color: #ffffff;
+        margin-bottom: 4px;
+    }
+    
+    .source-meta {
+        font-size: 12px;
+        color: #a0aec0;
+    }
+    
+    .chat-message {
+        background: #2d3748;
+        border-radius: 12px;
+        padding: 16px;
+        margin: 12px 0;
+    }
+    
+    .user-message {
+        background: #4299e1;
+        margin-left: 20%;
+    }
+    
+    .assistant-message {
+        background: #2d3748;
+        margin-right: 20%;
+        border-left: 3px solid #48bb78;
+    }
+    
+    .citation {
+        background: #1a202c;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 11px;
+        color: #90cdf4;
+        margin: 2px;
+        display: inline-block;
+    }
+    
+    /* Interactive citation styling */
+    .citation-number {
+        background: #4299e1;
+        color: white;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+        cursor: pointer;
+        display: inline-block;
+        margin: 0 2px;
+        position: relative;
+        transition: all 0.2s ease;
+    }
+    
+    .citation-number:hover {
+        background: #3182ce;
+        transform: scale(1.1);
+    }
+    
+    /* Tooltip styling */
+    .citation-tooltip {
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #2d3748;
+        color: #e2e8f0;
+        padding: 12px;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        border: 1px solid #4a5568;
+        max-width: 400px;
+        width: max-content;
+        z-index: 1000;
+        font-size: 12px;
+        line-height: 1.4;
+        margin-bottom: 8px;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s ease, visibility 0.3s ease;
+        pointer-events: none;
+    }
+    
+    .citation-number:hover .citation-tooltip {
+        opacity: 1;
+        visibility: visible;
+    }
+    
+    /* Tooltip arrow */
+    .citation-tooltip::after {
+        content: '';
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        border: 6px solid transparent;
+        border-top-color: #2d3748;
+    }
+    
+    .tooltip-source {
+        font-weight: bold;
+        color: #4299e1;
+        margin-bottom: 6px;
+        font-size: 11px;
+    }
+    
+    .tooltip-content {
+        max-height: 200px;
+        overflow-y: auto;
+        text-align: left;
+    }
+    
+    .upload-area {
+        border: 2px dashed #4a5568;
+        border-radius: 12px;
+        padding: 40px;
+        text-align: center;
+        background: #1a202c;
+        margin: 20px 0;
+    }
+    
+    .upload-text {
+        color: #a0aec0;
+        font-size: 16px;
+        margin-bottom: 20px;
+    }
+    
+    .stButton > button {
+        background: #4299e1;
+        color: white;
+        border-radius: 6px;
+        border: none;
+        padding: 8px 24px;
+        font-weight: 500;
+    }
+    
+    .source-count {
+        background: #4a5568;
+        color: #ffffff;
+        border-radius: 12px;
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+def init_session_state():
+    if 'pipeline' not in st.session_state:
+        st.session_state.pipeline = None
+    if 'sources' not in st.session_state:
+        st.session_state.sources = []
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    if 'show_source_dialog' not in st.session_state:
+        st.session_state.show_source_dialog = False
+    if 'pipeline_initialized' not in st.session_state:
+        st.session_state.pipeline_initialized = False
+
+def reset_chat():
+    try:
+        # Clear existing session from Zep if memory is available
+        # if st.session_state.pipeline and st.session_state.pipeline['memory']:
+        memory = st.session_state.pipeline['memory']
+        try:
+            memory.clear_session()
+            st.success("✅ Zep session cleared and recreated")
+        except Exception as e:
+            st.warning(f"Could not clear Zep session: {str(e)}")
+        
+        st.session_state.chat_history = []
+        st.session_state.session_id = str(uuid.uuid4())
+        
+        # Reinitialize memory with new session if available
+        if st.session_state.pipeline and st.session_state.pipeline['memory']:
+            new_memory = NotebookMemoryLayer(
+                user_id="streamlit_user",
+                session_id=st.session_state.session_id,
+                create_new_session=True
+            )
+            st.session_state.pipeline['memory'] = new_memory
+            st.success("✅ New Zep session initialized")
+        
+        st.success("✅ Chat reset successfully!")
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ Error resetting chat: {str(e)}")
+
+def initialize_pipeline():
+    if st.session_state.pipeline_initialized:
+        return True
+    
+    try:
+        lightning_key = st.session_state.get("lightning_api_key", "")
+        assemblyai_key = st.session_state.get("assemblyai_api_key", "")
+        firecrawl_key = st.session_state.get("firecrawl_api_key", "")
+        zep_key = st.session_state.get("zep_api_key", "")
+        
+        # Check if all required API keys are provided
+        if not all([lightning_key, assemblyai_key, firecrawl_key, zep_key]):
+            st.warning("⚠️ Please provide all API keys in the sidebar to initialize the system.")
+            return False
+        
+        with st.spinner("Initializing NotebookLM pipeline..."):
+            doc_processor = DocumentProcessor()
+            embedding_generator = EmbeddingGenerator()
+            vector_db = MilvusVectorDB(
+                db_path=f"./milvus_lite_{st.session_state.session_id[:8]}.db", 
+                collection_name=f"collection_{st.session_state.session_id[:8]}"
+            )
+            
+            rag_generator = RAGGenerator(
+                embedding_generator=embedding_generator,
+                vector_db=vector_db,
+                lightning_api_key=lightning_key
+            )
+            
+            audio_transcriber = AudioTranscriber(assemblyai_key) if assemblyai_key else None
+            youtube_transcriber = YouTubeTranscriber(assemblyai_key) if assemblyai_key else None
+            web_scraper = WebScrapper(firecrawl_key) if firecrawl_key else None
+            podcast_script_generator = PodcastScriptGenerator(lightning_key) if lightning_key else None
+            
+            try:
+                podcast_tts_generator = PodcastTTSGenerator() if lightning_key else None
+                if podcast_tts_generator:
+                    logger.info("PodcastTTSGenerator initialized successfully")
+            except ImportError:
+                logger.warning("Kokoro TTS not available. Podcast audio generation will be disabled.")
+                podcast_tts_generator = None
+            except Exception as e:
+                logger.error(f"Error initializing TTS: {e}")
+                podcast_tts_generator = None
+            
+            memory = None
+            if zep_key:
+                memory = NotebookMemoryLayer(
+                    user_id="streamlit_user",
+                    session_id=st.session_state.session_id,
+                    create_new_session=True
+                )
+            
+            st.session_state.pipeline = {
+                'doc_processor': doc_processor,
+                'embedding_generator': embedding_generator,
+                'vector_db': vector_db,
+                'rag_generator': rag_generator,
+                'audio_transcriber': audio_transcriber,
+                'youtube_transcriber': youtube_transcriber,
+                'web_scraper': web_scraper,
+                'podcast_script_generator': podcast_script_generator,
+                'podcast_tts_generator': podcast_tts_generator,
+                'memory': memory
+            }
+            
+            st.session_state.pipeline_initialized = True
+            st.success("✅ Pipeline initialized successfully!")
+            return True
+            
+    except Exception as e:
+        st.error(f"❌ Failed to initialize pipeline: {str(e)}")
+        return False
+
+def process_uploaded_files(uploaded_files):
+    if not st.session_state.pipeline:
+        return
+    
+    pipeline = st.session_state.pipeline
+
+    with st.spinner(f"Processing {len(uploaded_files)} file(s)..."):
+        for uploaded_file in uploaded_files:
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+                    tmp_file.write(uploaded_file.getbuffer())
+                    temp_path = tmp_file.name
+                
+                if uploaded_file.type.startswith('audio/'):
+                    if pipeline['audio_transcriber']:
+                        chunks = pipeline['audio_transcriber'].transcribe_audio(temp_path)
+                        source_type = "Audio"
+                        
+                        for chunk in chunks:
+                            chunk.source_file = uploaded_file.name
+                    else:
+                        st.warning(f"Audio processing not available for {uploaded_file.name}")
+                        os.unlink(temp_path)
+                        continue
+                else:
+                    chunks = pipeline['doc_processor'].process_document(temp_path)
+                    source_type = "Document"
+                    
+                    for chunk in chunks:
+                        chunk.source_file = uploaded_file.name
+                
+                if chunks:
+                    embedded_chunks = pipeline['embedding_generator'].generate_embeddings(chunks)
+                    
+                    if len(st.session_state.sources) == 0:
+                        pipeline['vector_db'].create_index(use_binary_quantization=False)
+                    
+                    pipeline['vector_db'].insert_embeddings(embedded_chunks)
+                    
+                    source_info = {
+                        'name': uploaded_file.name,
+                        'type': source_type,
+                        'size': f"{len(uploaded_file.getbuffer()) / 1024:.1f} KB",
+                        'chunks': len(chunks),
+                        'uploaded_at': time.strftime("%Y-%m-%d %H:%M")
+                    }
+                    st.session_state.sources.append(source_info)
+                    st.success(f"✅ Processed {uploaded_file.name}: {len(chunks)} chunks")
+                
+                os.unlink(temp_path)
+                
+            except Exception as e:
+                st.error(f"❌ Failed to process {uploaded_file.name}: {str(e)}")
+                if 'temp_path' in locals():
+                    os.unlink(temp_path)
+
+def process_urls(urls_text):
+    if not st.session_state.pipeline or not st.session_state.pipeline['web_scraper']:
+        st.warning("Web scraping not available (missing FIRECRAWL_API_KEY)")
+        return
+    
+    urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
+    if not urls:
+        return
+    
+    pipeline = st.session_state.pipeline
+    
+    with st.spinner(f"Scraping {len(urls)} URL(s)..."):
+        for url in urls:
+            try:
+                chunks = pipeline['web_scraper'].scrape_url(url)
+                
+                if chunks:
+                    for chunk in chunks:
+                        chunk.source_file = url
+                    
+                    embedded_chunks = pipeline['embedding_generator'].generate_embeddings(chunks)
+                    # Create index if first document
+                    if len(st.session_state.sources) == 0:
+                        pipeline['vector_db'].create_index(use_binary_quantization=False)
+                    
+                    pipeline['vector_db'].insert_embeddings(embedded_chunks)
+                    source_info = {
+                        'name': url,
+                        'type': "Website",
+                        'size': f"{len(chunks)} chunks",
+                        'chunks': len(chunks),
+                        'uploaded_at': time.strftime("%Y-%m-%d %H:%M")
+                    }
+                    st.session_state.sources.append(source_info)
+                    st.success(f"✅ Scraped {url}: {len(chunks)} chunks")
+                else:
+                    st.warning(f"No content extracted from {url}")
+                    
+            except Exception as e:
+                st.error(f"❌ Failed to scrape {url}: {str(e)}")
+
+def process_youtube_video(youtube_url):
+    if not st.session_state.pipeline or not st.session_state.pipeline['youtube_transcriber']:
+        st.warning("YouTube processing not available (missing ASSEMBLYAI_API_KEY)")
+        return
+    
+    pipeline = st.session_state.pipeline
+    transcriber = pipeline['youtube_transcriber']
+    
+    with st.spinner("Processing YouTube video..."):
+        try:
+            chunks = transcriber.transcribe_youtube_video(youtube_url, cleanup_audio=True)
+            
+            if chunks:
+                video_id = transcriber.extract_video_id(youtube_url)
+                video_name = f"YouTube Video {video_id}"
+                for chunk in chunks:
+                    chunk.source_file = video_name
+                
+                embedded_chunks = pipeline['embedding_generator'].generate_embeddings(chunks)
+                
+                if len(st.session_state.sources) == 0:
+                    pipeline['vector_db'].create_index(use_binary_quantization=False)
+                
+                pipeline['vector_db'].insert_embeddings(embedded_chunks)
+                
+                source_info = {
+                    'name': video_name,
+                    'type': "YouTube Video",
+                    'size': f"{len(chunks)} utterances",
+                    'chunks': len(chunks),
+                    'uploaded_at': time.strftime("%Y-%m-%d %H:%M"),
+                    'url': youtube_url,
+                    'video_id': video_id
+                }
+                st.session_state.sources.append(source_info)
+                st.success(f"✅ Processed YouTube video: {len(chunks)} utterances")
+            else:
+                st.warning("No transcript content extracted from the video")
+                
+        except Exception as e:
+            st.error(f"❌ Failed to process YouTube video: {str(e)}")
+            logger.error(f"YouTube processing error: {str(e)}")
+
+def process_text(text_content):
+    if not st.session_state.pipeline or not text_content.strip():
+        return
+    
+    pipeline = st.session_state.pipeline
+    
+    with st.spinner("Processing text..."):
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tmp_file:
+                tmp_file.write(text_content)
+                temp_path = tmp_file.name
+            
+            chunks = pipeline['doc_processor'].process_document(temp_path)
+            
+            original_name = f"Pasted Text ({time.strftime('%H:%M')})"
+            for chunk in chunks:
+                chunk.source_file = original_name
+            
+            if chunks:
+                embedded_chunks = pipeline['embedding_generator'].generate_embeddings(chunks)
+                
+                if len(st.session_state.sources) == 0:
+                    pipeline['vector_db'].create_index(use_binary_quantization=False)
+                
+                pipeline['vector_db'].insert_embeddings(embedded_chunks)
+                
+                source_info = {
+                    'name': original_name,
+                    'type': "Text",
+                    'size': f"{len(text_content)} chars",
+                    'chunks': len(chunks),
+                    'uploaded_at': time.strftime("%Y-%m-%d %H:%M")
+                }
+                st.session_state.sources.append(source_info)
+                st.success(f"✅ Processed text: {len(chunks)} chunks")
+            
+            os.unlink(temp_path)
+            
+        except Exception as e:
+            st.error(f"❌ Failed to process text: {str(e)}")
+
+def render_api_keys_sidebar():
+    with st.sidebar:
+        st.markdown('<div class="main-header">🔑 API Keys</div>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            lightning_key = st.text_input(
+                "LIGHTNING API Key",
+                type="password",
+                key="lightning_api_key"
+            )
+        with col2:
+            st.markdown('<a href="https://lightning.ai/lightning-ai/models?section=allmodels&view=org" target="_blank" style="text-decoration: none;"><button style="background: #4CAF50; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Get API key</button></a>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            assemblyai_key = st.text_input(
+                "AssemblyAI API Key",
+                type="password",
+                key="assemblyai_api_key"
+            )
+        with col2:
+            st.markdown('<a href="https://www.assemblyai.com/" target="_blank" style="text-decoration: none;"><button style="background: #4CAF50; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Get API key</button></a>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            zep_key = st.text_input(
+                "Zep API Key",
+                type="password",
+                key="zep_api_key"
+            )
+        with col2:
+            st.markdown('<a href="https://www.getzep.com/" target="_blank" style="text-decoration: none;"><button style="background: #4CAF50; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Get API key</button></a>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            firecrawl_key = st.text_input(
+                "Firecrawl API Key",
+                type="password",
+                key="firecrawl_api_key"
+            )
+        with col2:
+            st.markdown('<a href="https://www.firecrawl.dev/" target="_blank" style="text-decoration: none;"><button style="background: #4CAF50; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Get API key</button></a>', unsafe_allow_html=True)
+        
+        # API Key Status
+        api_keys_provided = {
+            "LightningAI": bool(lightning_key),
+            "AssemblyAI": bool(assemblyai_key),
+            "Zep": bool(zep_key),
+            "Firecrawl": bool(firecrawl_key)
+        }
+        
+        provided_count = sum(api_keys_provided.values())
+        if provided_count == 4:
+            st.success("✅ All API keys provided")
+        elif provided_count > 0:
+            st.warning(f"⚠️ {provided_count}/4 API keys provided")
+        else:
+            st.error("❌ No API keys provided")
+        
+        st.markdown("---")
+
+def render_sources_sidebar():
+    with st.sidebar:
+        st.markdown('<div class="main-header">📚 Sources</div>', unsafe_allow_html=True)
+        
+        # Display sources
+        if st.session_state.sources:
+            st.markdown(f'<div class="source-count">{len(st.session_state.sources)} sources</div>', unsafe_allow_html=True)
+            
+            for i, source in enumerate(st.session_state.sources):
+                with st.container():
+                    st.markdown(f'''
+                    <div class="source-item">
+                        <div class="source-title">{source['name']}</div>
+                        <div class="source-meta">{source['type']} • {source['size']} • {source['chunks']} chunks</div>
+                        <div class="source-meta">{source['uploaded_at']}</div>
+                    </div>
+                    ''', unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="text-align: center; padding: 20px; color: #a0aec0;">
+                <p>Saved sources will appear here</p>
+                <p style="font-size: 14px;">Click Add source above to add PDFs, websites, text, videos, or audio files.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Export/Import indexed items (InMemoryVectorDB only)
+        st.markdown("---")
+        st.markdown("### ⚙️ Index Management")
+
+        vector_db = None
+        try:
+            vector_db = st.session_state.pipeline.get('vector_db') if st.session_state.pipeline else None
+        except Exception:
+            vector_db = None
+
+        if vector_db is not None and hasattr(vector_db, 'export_state'):
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("📤 Export Indexed Items", key="export_index_btn"):
+                    try:
+                        exported = vector_db.export_state()
+                        json_data = json.dumps(exported)
+                        st.download_button(
+                            label="Download Indexed Snapshot (JSON)",
+                            data=json_data,
+                            file_name=f"indexed_snapshot_{int(time.time())}.json",
+                            mime="application/json"
+                        )
+                    except Exception as e:
+                        st.error(f"Export failed: {e}")
+            with col2:
+                uploaded_snapshot = st.file_uploader("📥 Import Indexed Snapshot (JSON)", type=['json'], key='import_index_uploader')
+                if uploaded_snapshot is not None:
+                    if st.button("Import Snapshot", key="import_snapshot_btn"):
+                        try:
+                            content = uploaded_snapshot.getvalue().decode('utf-8')
+                            items = json.loads(content)
+                            imported = vector_db.import_state(items)
+                            st.success(f"Imported {imported} items into the index.")
+                            # Update session sources preview if available
+                            try:
+                                st.session_state.sources = vector_db.list_items()[:20]
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            st.error(f"Import failed: {e}")
+        else:
+            st.info("Index export/import is available for the in-memory development DB only.")
+
+def render_source_upload_dialog():
+    st.markdown("### 📁 Add sources")
+    st.markdown("""
+    Sources let NotebookLM base its responses on the information that matters most to you.  
+    (Examples: marketing plans, course reading, research notes, meeting transcripts, sales documents, etc.)
+    """)
+    
+    # File upload section
+    st.markdown("#### Upload sources")
+    uploaded_files = st.file_uploader(
+        "Drag & drop or choose file to upload",
+        accept_multiple_files=True,
+        type=['pdf', 'txt', 'md', 'mp3', 'wav', 'm4a', 'ogg'],
+        help="Supported file types: PDF, .txt, Markdown, Audio (e.g. mp3)"
+    )
+    
+    if uploaded_files:
+        if st.button("Process Files"):
+            process_uploaded_files(uploaded_files)
+            st.rerun()
+    
+    # Tabs for different input methods
+    tab1, tab2, tab3 = st.tabs(["🌐 Website", "🎥 YouTube", "📋 Paste text"])
+    
+    with tab1:
+        st.markdown("#### Website URLs")
+        urls_text = st.text_area(
+            "Paste in Web URLs below to upload as sources",
+            placeholder="https://example.com\nhttps://another-site.com",
+            help="To add multiple URLs, separate with a space or new line.\nOnly the visible text on the website will be imported.\nPaid articles are not supported."
+        )
+        if st.button("Process URLs", key="url_btn") and urls_text.strip():
+            process_urls(urls_text)
+            st.rerun()
+    
+    with tab2:
+        st.markdown("#### YouTube Videos")
+        youtube_url = st.text_input(
+            "Paste YouTube URL",
+            placeholder="https://www.youtube.com/watch?v=...",
+            help="Paste a YouTube video URL to extract and transcribe its audio content"
+        )
+        
+        if st.button("Process YouTube Video", key="youtube_btn") and youtube_url.strip():
+            process_youtube_video(youtube_url.strip())
+            st.rerun()
+    
+    with tab3:
+        st.markdown("#### Paste copied text")
+        text_content = st.text_area(
+            "Paste your copied text below to upload as a source",
+            placeholder="Paste text here...",
+            height=200
+        )
+        if st.button("Process Text", key="text_btn") and text_content.strip():
+            process_text(text_content)
+            st.rerun()
+
+def render_chat_interface():
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown('<div class="main-header">💬 Chat</div>', unsafe_allow_html=True)
+    with col2:
+        if st.session_state.chat_history:
+            if st.button("🗑️ Reset", help="Clear chat history and start new session"):
+                reset_chat()
+    
+    if not st.session_state.sources:
+        st.markdown("""
+        <div class="upload-area">
+            <div class="upload-text">Add a source in the "Add Sources" tab to get started</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Display chat history
+        for message in st.session_state.chat_history:
+            if message['role'] == 'user':
+                st.markdown(f'''
+                <div class="chat-message user-message">
+                    <strong>You:</strong> {message['content']}
+                </div>
+                ''', unsafe_allow_html=True)
+            else:
+                content_to_display = message.get('interactive_content', message['content'])
+                
+                st.markdown(f'''
+                <div class="chat-message assistant-message">
+                    <strong>Assistant:</strong> {content_to_display}
+                </div>
+                ''', unsafe_allow_html=True)
+                
+                if 'citations' in message and not message.get('interactive_content'):
+                    citation_html = "".join([f'<span class="citation">{cite}</span>' for cite in message['citations']])
+                    st.markdown(f'<div style="margin-top: 8px;">{citation_html}</div>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([10, 1])
+        with col1:
+            query = st.text_input(
+                "Upload a source to get started",
+                placeholder="Ask me anything about your sources...",
+                key="chat_input"
+            )
+        with col2:
+            send_button = st.button("➤", key="send_btn")
+        
+        if send_button and query.strip() and st.session_state.pipeline:
+            with st.spinner("Thinking..."):
+                try:
+                    result = st.session_state.pipeline['rag_generator'].generate_response(query)
+                    
+                    # Add to chat history
+                    st.session_state.chat_history.append({
+                        'role': 'user',
+                        'content': query
+                    })
+                    
+                    interactive_response = None
+                    if result.sources_used:
+                        try:
+                            interactive_response = create_interactive_citations(result.response, result.sources_used)
+                            logger.info(f"Created interactive citations for {len(result.sources_used)} sources")
+                        except Exception as e:
+                            logger.error(f"Failed to create interactive citations: {e}")
+                    else:
+                        logger.info("No sources available for interactive citations")
+                    
+                    citations = []
+                    for source in result.sources_used:
+                        cite_text = f"Source: {source.get('source_file', 'Unknown')}"
+                        if source.get('page_number'):
+                            cite_text += f", Page: {source['page_number']}"
+                        citations.append(cite_text)
+                    
+                    st.session_state.chat_history.append({
+                        'role': 'assistant',
+                        'content': result.response,
+                        'interactive_content': interactive_response,
+                        'citations': citations,
+                        'sources_used': result.sources_used
+                    })
+                    
+                    if st.session_state.pipeline['memory']:
+                        st.session_state.pipeline['memory'].save_conversation_turn(result)
+                    
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Error generating response: {str(e)}")
+
+def generate_podcast(selected_source: str, podcast_style: str, podcast_length: str):
+    if not st.session_state.pipeline or not st.session_state.pipeline['podcast_script_generator']:
+        st.error("Podcast generation not available. Please check your LIGHTNING API key.")
+        return
+    
+    pipeline = st.session_state.pipeline
+    
+    try:
+        source_info = None
+        for source in st.session_state.sources:
+            if source['name'] == selected_source:
+                source_info = source
+                break
+        
+        if not source_info:
+            st.error(f"Could not find source: {selected_source}")
+            return
+        
+        # Gather content from the selected source
+        with st.spinner(f"📚 Gathering content from {selected_source}..."):
+            try:
+                query_embedding = pipeline['embedding_generator'].generate_query_embedding(f"content from {selected_source}")
+                search_results = pipeline['vector_db'].search(
+                    query_embedding, 
+                    limit=50,
+                    filter_expr=f'source_file == "{selected_source}"'
+                )
+                
+                if not search_results:
+                    st.error(f"Could not find content for {selected_source}. Please try again.")
+                    return
+                
+                search_results.sort(key=lambda x: x.get('chunk_index', 0))
+                
+            except Exception as e:
+                st.error(f"Error retrieving content from {selected_source}: {e}")
+                return
+        
+        with st.spinner("✍️ Generating podcast script..."):
+            script_generator = pipeline['podcast_script_generator']
+            
+            if source_info['type'] == 'Website':
+                # For websites, use the specialized website method
+                from dataclasses import dataclass
+                
+                @dataclass
+                class ChunkLike:
+                    content: str
+                
+                chunks = [ChunkLike(content=result['content']) for result in search_results]
+                
+                podcast_script = script_generator.generate_script_from_website(
+                    website_chunks=chunks,
+                    source_url=selected_source,
+                    podcast_style=podcast_style.lower(),
+                    target_duration=podcast_length
+                )
+            else:
+                # For documents, audio, text, etc., use the text method
+                combined_content = "\n\n".join([result['content'] for result in search_results])
+                
+                podcast_script = script_generator.generate_script_from_text(
+                    text_content=combined_content,
+                    source_name=selected_source,
+                    podcast_style=podcast_style.lower(),
+                    target_duration=podcast_length
+                )
+            
+            st.success(f"✅ Generated podcast script with {podcast_script.total_lines} dialogue segments!")
+            
+            # Store script in session state for audio generation
+            st.session_state.current_podcast_script = podcast_script
+        
+        # Automatically generate audio if TTS is available
+        tts_generator = pipeline.get('podcast_tts_generator')
+        if tts_generator:
+            with st.spinner("🎵 Generating podcast... This may take several minutes..."):
+                try:
+                    import tempfile
+                    temp_dir = tempfile.mkdtemp(prefix="podcast_")
+                    
+                    # Generate audio
+                    audio_files = tts_generator.generate_podcast_audio(
+                        podcast_script=podcast_script,
+                        output_dir=temp_dir,
+                        combine_audio=True
+                    )
+                    
+                    st.success(f"✅ Generated {len(audio_files)} audio files!")
+                    
+                    st.markdown("### 🎙️ Generated Podcast")
+                    for audio_file in audio_files:
+                        file_name = Path(audio_file).name
+                        
+                        if "complete_podcast" in file_name:
+                            st.audio(audio_file, format="audio/wav")
+                            
+                            with open(audio_file, "rb") as f:
+                                st.download_button(
+                                    label="📥 Download Complete Podcast",
+                                    data=f.read(),
+                                    file_name=f"complete_podcast_{int(time.time())}.wav",
+                                    mime="audio/wav"
+                                )
+                
+                except Exception as e:
+                    st.error(f"❌ Audio generation failed: {str(e)}")
+                    logger.error(f"Audio generation error: {e}")
+                    
+                    if "No module named" in str(e):
+                        st.error("🔧 Missing dependency. Please check the installation.")
+                    elif "File" in str(e) and "not found" in str(e):
+                        st.error("📁 File system error. Check permissions and disk space.")
+        else:
+            st.warning("⚠️ Audio generation not available - TTS not initialized.")
+        
+        # Display the generated script
+        st.markdown("### 📝 Generated Podcast Script")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📊 Total Lines", podcast_script.total_lines)
+        with col2:
+            st.metric("⏱️ Est. Duration", podcast_script.estimated_duration)
+        with col3:
+            st.metric("📚 Source Type", source_info['type'])
+        
+        # Display script content
+        with st.expander("👀 View Complete Script", expanded=True):
+            for i, line_dict in enumerate(podcast_script.script, 1):
+                speaker, dialogue = next(iter(line_dict.items()))
+                
+                # Color code speakers
+                if speaker == "Speaker 1":
+                    st.markdown(f'<div style="background: #1e3a8a; padding: 10px; border-radius: 5px; margin: 5px 0;"><strong>👩 {speaker}:</strong> {dialogue}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div style="background: #166534; padding: 10px; border-radius: 5px; margin: 5px 0;"><strong>👨 {speaker}:</strong> {dialogue}</div>', unsafe_allow_html=True)
+        
+        script_json = podcast_script.to_json()
+        st.download_button(
+            label="📥 Download Script (JSON)",
+            data=script_json,
+            file_name=f"podcast_script_{int(time.time())}.json",
+            mime="application/json"
+        )
+    
+    except Exception as e:
+        st.error(f"❌ Podcast generation failed: {str(e)}")
+        logger.error(f"Podcast generation error: {e}")
+
+def render_studio_tab():
+    st.markdown('<div class="main-header">🎙️ Podcast Studio</div>', unsafe_allow_html=True)
+    
+    if not st.session_state.sources:
+        st.markdown("""
+        <div style="text-align: center; padding: 40px; color: #a0aec0;">
+            <p>Studio output will be saved here.</p>
+            <p>After adding sources, click to add Podcast Generation and more!</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("Create an AI-generated podcast discussion from your documents")
+        
+        source_names = [source['name'] for source in st.session_state.sources]
+        selected_source = st.selectbox(
+            "Select source for podcast",
+            source_names,
+            index=0 if source_names else None,
+            help="Choose a document to create a podcast discussion about"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            podcast_style = st.selectbox(
+                "Podcast Style",
+                ["Conversational", "Interview", "Debate", "Educational"]
+            )
+        with col2:
+            podcast_length = st.selectbox(
+                "Duration",
+                ["5 minutes", "10 minutes", "15 minutes", "20 minutes"]
+            )
+        
+        if st.button("🎙️ Generate Podcast", use_container_width=True):
+            if selected_source:
+                generate_podcast(selected_source, podcast_style, podcast_length)
+            else:
+                st.warning("Please select a source for the podcast")
 
 def main():
-    st.markdown('<h1 class="main-header">🤖 Multimodal RAG Assistant</h1>', unsafe_allow_html=True)
-    st.markdown("Ask questions about your documents with support for text and images!")
+    init_session_state()
+    
+    st.markdown("""
+    <div style="display: flex; align-items: center; margin-bottom: 30px;">
+        <h1 style="color: #ffffff; margin: 0;">🧠 NotebookLM: Understand Anything</h1>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    render_api_keys_sidebar()
 
-    # Initialize session state for configuration
-    if 'provider' not in st.session_state:
-        st.session_state.provider = "groq"
-    if 'model_name' not in st.session_state:
-        st.session_state.model_name = "llama3-8b-8192"
-    if 'max_chunks' not in st.session_state:
-        st.session_state.max_chunks = 8
-    if 'max_context_chars' not in st.session_state:
-        st.session_state.max_context_chars = 4000
-
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-
-        # Provider selection
-        provider = st.selectbox(
-            "AI Provider",
-            ["groq", "ollama"],
-            index=["groq", "ollama"].index(st.session_state.provider),
-            help="Choose your AI provider"
-        )
-        st.session_state.provider = provider
-
-        # Model selection based on provider
-        if provider == "groq":
-            model_options = [
-                "llama3-8b-8192",
-                "llama3-70b-8192",
-                "llama-3.2-11b-vision-instruct",  # Vision model
-                "llama-3.2-90b-vision-instruct"   # Vision model
-            ]
-        else:  # ollama
-            model_options = [
-                "llama3.2",
-                "llava",  # Vision model
-                "llava:13b",
-                "bakllava",
-                "gpt-oss:20b",
-                "glm-4.6:cloud",
-                "deepseek-r1:8b",
-                "gemma3:12b",
-                "qwen3:8b",
-                "qwen3-vl:235b-cloud",
-                "gpt-oss:120b-cloud"
-            ]
-
-        model_name = st.selectbox(
-            "Model",
-            model_options,
-            index=model_options.index(st.session_state.model_name) if st.session_state.model_name in model_options else 0,
-            help="Choose the model to use"
-        )
-        st.session_state.model_name = model_name
-
-        # RAG parameters
-        st.subheader("RAG Settings")
-        max_chunks = st.slider("Max Chunks", 1, 20, st.session_state.max_chunks, help="Maximum number of document chunks to retrieve")
-        max_context_chars = st.slider("Max Context (chars)", 1000, 10000, st.session_state.max_context_chars, help="Maximum context length")
-
-        st.session_state.max_chunks = max_chunks
-        st.session_state.max_context_chars = max_context_chars
-
-        # Initialize button
-        if st.button("🔄 Initialize System", type="primary"):
-            with st.spinner("Initializing RAG system..."):
-                rag_system = initialize_components(provider, model_name)
-                if rag_system:
-                    st.session_state.rag_system = rag_system
-                    st.success("✅ System initialized successfully!")
-                else:
-                    st.error("❌ Failed to initialize system")
-
-    # Main content area
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("💬 Ask Your Question")
-
-        # Text input
-        query = st.text_area(
-            "Enter your question:",
-            height=100,
-            placeholder="What would you like to know about your documents?"
-        )
-
-        # Image upload
-        uploaded_image = st.file_uploader(
-            "📸 Upload an image (optional)",
-            type=["png", "jpg", "jpeg", "gif", "bmp"],
-            help="Upload an image to include in your query for multimodal analysis"
-        )
-
-        # Document upload
-        uploaded_document = st.file_uploader(
-            "📄 Upload a document",
-            type=["pdf", "txt", "md", "pptx", "docx"],
-            help="Upload a document to include in your query for analysis"
-        )
-
-        # Show uploaded image preview
-        if uploaded_image:
-            st.image(uploaded_image, caption="Uploaded Image", width=300)
-
-        # Process uploaded document
-        if uploaded_document:
-            st.info(f"Uploaded Document: {uploaded_document.name}")
-            # Add logic to process the uploaded document here
-
-        # Generate response button
-        generate_button = st.button(
-            "🚀 Generate Response",
-            type="primary",
-            disabled=query.strip() == "" or 'rag_system' not in st.session_state
-        )
-
-    with col2:
-        st.subheader("📊 System Status")
-
-        if 'rag_system' in st.session_state:
-            st.success("✅ RAG System Ready")
-            st.info(f"**Provider:** {st.session_state.provider}")
-            st.info(f"**Model:** {st.session_state.model_name}")
-            st.info(f"**Max Chunks:** {st.session_state.max_chunks}")
-            st.info(f"**Max Context:** {st.session_state.max_context_chars} chars")
-        else:
-            st.warning("⚠️ System not initialized")
-            st.info("Please configure and initialize the system in the sidebar")
-
-    # Response area
-    if generate_button and query.strip():
-        with st.spinner("Generating response..."):
-            try:
-                # Process multimodal content
-                multimodal_content = []
-                if uploaded_image:
-                    image_content = process_image_upload(uploaded_image)
-                    if image_content:
-                        multimodal_content.append(image_content)
-
-                # Generate response
-                result = st.session_state.rag_system.generate_response(
-                    query=query,
-                    max_chunks=st.session_state.max_chunks,
-                    max_context_chars=st.session_state.max_context_chars,
-                    multimodal_content=multimodal_content if multimodal_content else None
-                )
-
-                # Display response
-                st.markdown("---")
-                st.subheader("📝 Response")
-
-                with st.container():
-                    st.markdown('<div class="response-box">', unsafe_allow_html=True)
-                    st.markdown(result.response)
-                    st.markdown('</div>', unsafe_allow_html=True)
-
-                # Display citations
-                if result.sources_used:
-                    st.subheader("📚 Sources Cited")
-                    with st.container():
-                        st.markdown('<div class="citation-box">', unsafe_allow_html=True)
-                        citation_summary = result.get_citation_summary()
-                        st.markdown(citation_summary)
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                    # Expandable section for detailed sources
-                    with st.expander("🔍 View Detailed Sources"):
-                        for i, source in enumerate(result.sources_used, 1):
-                            st.markdown(f"**[{i}]** {source.get('source_file', 'Unknown')}")
-                            if source.get('content'):
-                                st.text_area(
-                                    f"Content from source {i}",
-                                    source['content'][:500] + "..." if len(source['content']) > 500 else source['content'],
-                                    height=100,
-                                    disabled=True,
-                                    key=f"source_{i}"
-                                )
-
-                # Display multimodal content info
-                if result.multimodal_content:
-                    st.subheader("🖼️ Multimodal Content Processed")
-                    for i, content in enumerate(result.multimodal_content):
-                        st.info(f"Processed {content.type} content: {content.metadata.get('filename', f'Item {i+1}') if content.metadata else f'Item {i+1}'}")
-
-                # Display metadata
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    st.metric("Sources Used", result.retrieval_count)
-                with col_b:
-                    st.metric("Generation Tokens", result.generation_tokens or "N/A")
-                with col_c:
-                    st.metric("Query Length", len(query))
-
-            except Exception as e:
-                st.error(f"❌ Error generating response: {str(e)}")
-                st.exception(e)
-
-    # Footer
+    if not initialize_pipeline():
+        st.stop()
+    
+    render_sources_sidebar()
+    
+    tab1, tab2, tab3 = st.tabs(["📁 Add Sources", "💬 Chat", "🎙️ Studio"])
+    with tab1:
+        render_source_upload_dialog()
+    with tab2:
+        render_chat_interface()
+    with tab3:
+        render_studio_tab()
+    
     st.markdown("---")
-    st.markdown("*Built with Streamlit, LiteLLM, and multimodal RAG technology*")
+    st.markdown("""
+    <div style="text-align: center; color: #a0aec0; font-size: 12px;">
+        NotebookLM can be inaccurate; please double check its responses.
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

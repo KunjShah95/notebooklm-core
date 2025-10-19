@@ -7,7 +7,13 @@ from pathlib import Path
 import json
 
 import assemblyai as aai
-from src.document_preprocessing.doc_processor import DocumentMetadata, DocumentChunk
+from src.document_preprocessing.doc_processor import DocumentMetadata
+
+# Backwards compatibility: if DocumentChunk isn't exported, alias it to DocumentMetadata
+try:
+    from src.document_preprocessing.doc_processor import DocumentChunk  # type: ignore
+except Exception:
+    DocumentChunk = DocumentMetadata  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

@@ -51,6 +51,17 @@ class DocumentMetadata:
         citation.update(self.metadata)
         return citation
 
+
+# Backwards-compatible alias: some modules expect DocumentChunk
+# which is equivalent to DocumentMetadata in this project.
+DocumentChunk = DocumentMetadata
+
+__all__ = [
+    'DocumentMetadata',
+    'DocumentChunk',
+    'DocumentProcessor'
+]
+
 class DocumentProcessor:
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.chunk_size = chunk_size

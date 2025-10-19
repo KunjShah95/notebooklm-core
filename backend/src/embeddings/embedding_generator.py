@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class EmbeddedChunk:
     embedding: np.ndarray
     chunk: DocumentMetadata
-    embedding_model= str
+    embedding_model: str
 
     def to_vector_db_format(self) -> Dict[str, Any]:
         return {
@@ -35,6 +35,7 @@ class EmbeddingGenerator:
         self.embedding_model = TextEmbedding(model_name)
         self.model= None
         self.embedding_dim = None
+        self.model_name = model_name
         self._initialize_model()
 
     def _initialize_model(self):
@@ -51,28 +52,33 @@ class EmbeddingGenerator:
             logger.error(f"Failed to initialize embedding model: {str(e)}")
             raise
 
-        def generate_embeddings(self, chunks: List[DocumentMetadata]) -> List[EmbeddedChunk]:
-         if not chunks:
+    def generate_embeddings(self, chunks: List[DocumentMetadata]) -> List[EmbeddedChunk]:
+        """Generate embeddings for a list of DocumentMetadata chunks.
+
+        This method is a normal instance method (not nested) so it won't
+        execute at import time.
+        """
+        if not chunks:
             return []
-        
+
         logger.info(f"Generating embeddings for {len(chunks)} chunks")
-        
+
         try:
             texts = [chunk.content for chunk in chunks]
-            
             embeddings = list(self.model.embed(texts))
-            embedded_chunks = []
+            embedded_chunks: List[EmbeddedChunk] = []
+
             for chunk, embedding in zip(chunks, embeddings):
                 embedded_chunk = EmbeddedChunk(
-                    chunk=chunk,
                     embedding=np.array(embedding, dtype=np.float32),
-                    embedding_model=self.model_name
+                    chunk=chunk,
+                    embedding_model=getattr(self, 'model_name', '')
                 )
                 embedded_chunks.append(embedded_chunk)
-            
+
             logger.info(f"Successfully generated {len(embedded_chunks)} embeddings")
             return embedded_chunks
-            
+
         except Exception as e:
             logger.error(f"Error generating embeddings: {str(e)}")
             raise
